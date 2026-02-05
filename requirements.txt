@@ -1,0 +1,7 @@
+# DanData TaskMaster - Cloud Deployment
+apscheduler==3.11.2
+aiohttp==3.12.0  
+aiohttp-cors==0.7.0
+requests==2.32.3
+supabase==2.12.0
+python-dotenv==1.0.0

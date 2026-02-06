@@ -6,6 +6,8 @@ Simple web interface for monitoring and managing background tasks
 
 import asyncio
 import json
+import os
+import hmac
 from datetime import datetime
 from typing import Dict, Any
 from aiohttp import web, web_request
@@ -16,13 +18,43 @@ from task_manager import DanDataTaskManager
 
 logger = logging.getLogger('dandata.web_interface')
 
+# Allowed origins for CORS (restrict to known frontends)
+ALLOWED_ORIGINS = os.getenv(
+    'ALLOWED_ORIGINS',
+    'https://dandata.vercel.app,https://dandata-taskmaster.up.railway.app'
+).split(',')
+
 class TaskManagerWebInterface:
     def __init__(self, task_manager: DanDataTaskManager):
         self.task_manager = task_manager
-        self.app = web.Application()
+        self.api_key = os.getenv('TASKMASTER_API_KEY', '')
+        self.app = web.Application(middlewares=[self._auth_middleware])
         self._setup_routes()
         self._setup_cors()
-    
+
+    @web.middleware
+    async def _auth_middleware(self, request: web.Request, handler):
+        """Require API key for protected endpoints"""
+        # Public endpoints that don't need auth
+        public_paths = {'/', '/health', '/dashboard'}
+        if request.path in public_paths:
+            return await handler(request)
+
+        # If no API key is configured, warn but allow (development mode)
+        if not self.api_key:
+            logger.warning("TASKMASTER_API_KEY not set - running without auth (dev mode)")
+            return await handler(request)
+
+        # Check API key from header
+        provided_key = request.headers.get('X-API-Key', '')
+        if not provided_key or not hmac.compare_digest(provided_key, self.api_key):
+            return web.json_response(
+                {"error": "Unauthorized - provide valid X-API-Key header"},
+                status=401
+            )
+
+        return await handler(request)
+
     def _setup_routes(self):
         """Setup web routes"""
         self.app.router.add_get('/', self.index)
@@ -30,21 +62,25 @@ class TaskManagerWebInterface:
         self.app.router.add_get('/jobs', self.list_jobs)
         self.app.router.add_post('/run/{task_name}', self.run_task)
         self.app.router.add_get('/health', self.health_check)
-        
+
         # Serve static dashboard
         self.app.router.add_get('/dashboard', self.dashboard)
-    
+
     def _setup_cors(self):
-        """Setup CORS for frontend integration"""
-        cors = aiohttp_cors.setup(self.app, defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-                allow_methods="*"
-            )
-        })
-        
+        """Setup CORS - restrict to known frontend origins"""
+        defaults = {}
+        for origin in ALLOWED_ORIGINS:
+            origin = origin.strip()
+            if origin:
+                defaults[origin] = aiohttp_cors.ResourceOptions(
+                    allow_credentials=True,
+                    expose_headers="*",
+                    allow_headers=("Content-Type", "X-API-Key"),
+                    allow_methods=("GET", "POST", "OPTIONS")
+                )
+
+        cors = aiohttp_cors.setup(self.app, defaults=defaults)
+
         for route in list(self.app.router.routes()):
             cors.add(route)
     
@@ -115,9 +151,17 @@ class TaskManagerWebInterface:
     
     async def health_check(self, request: web_request.Request) -> web.Response:
         """Perform immediate health check"""
-        return await self.run_task(web_request.Request({
-            'match_info': {'task_name': 'health_check'}
-        }))
+        try:
+            await self.task_manager._health_check_task()
+            return web.json_response({
+                "status": self.task_manager.health_status,
+                "last_check": self.task_manager.last_health_check.isoformat()
+                    if self.task_manager.last_health_check else None,
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"Health check failed: {str(e)}")
+            return web.json_response({"status": "unhealthy", "error": str(e)}, status=500)
     
     async def dashboard(self, request: web_request.Request) -> web.Response:
         """Serve simple HTML dashboard"""

@@ -23,6 +23,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
 
+from task_supabase_integration import supabase_integration
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -168,170 +170,111 @@ class DanDataTaskManager:
         """Clean up old soft-deleted records and optimize database"""
         task_id = f"db_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"Starting database cleanup task: {task_id}")
-        
+
         try:
-            # This would call a Supabase edge function for cleanup
-            # For now, we'll simulate the cleanup logic
-            cleanup_actions = [
-                "Clean soft-deleted records older than 30 days",
-                "Archive old transaction data (7+ years)",
-                "Clean up orphaned file references",
-                "Update database statistics"
-            ]
-            
-            results = {}
-            for action in cleanup_actions:
-                # Simulate cleanup action
-                logger.info(f"Executing: {action}")
-                results[action] = "completed"
-                await asyncio.sleep(1)  # Simulate processing time
-            
-            logger.info(f"Database cleanup completed: {results}")
-            
+            results = await supabase_integration.cleanup_old_data(retention_days=30)
+
+            if 'error' in results:
+                logger.warning(f"Database cleanup had errors: {results['error']}")
+                await self._send_alert('db_cleanup_partial', results['error'], results)
+            else:
+                logger.info(f"Database cleanup completed: {results}")
+
         except Exception as e:
             logger.error(f"Database cleanup task failed: {str(e)}")
             await self._send_alert('db_cleanup_failed', str(e))
 
     async def _backup_verification_task(self):
-        """Verify database backups are working correctly"""
+        """Verify database connectivity and data integrity as backup proxy"""
         task_id = f"backup_verify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"Starting backup verification task: {task_id}")
-        
+
         try:
-            # This would verify Supabase backups
-            # For implementation, this would:
-            # 1. Check if automatic backups are running
-            # 2. Verify backup integrity
-            # 3. Test restore capability in test environment
-            
+            # Verify database is reachable and data looks intact
+            health = await supabase_integration.get_system_health()
+            integrity = await supabase_integration.check_data_integrity()
+
             verification_results = {
-                "automatic_backups": "enabled",
-                "last_backup": "2026-02-04T02:00:00Z",
-                "backup_size": "245MB",
-                "integrity_check": "passed"
+                "database_status": health.get('services', {}).get('database', 'unknown'),
+                "edge_functions_status": health.get('services', {}).get('edge_functions', 'unknown'),
+                "integrity_issues": integrity.get('issues_found', []),
+                "checks_performed": integrity.get('checks_performed', []),
+                "timestamp": datetime.now().isoformat()
             }
-            
+
+            if verification_results['database_status'] != 'healthy':
+                await self._send_alert(
+                    'backup_verification_warning',
+                    f"Database status: {verification_results['database_status']}",
+                    verification_results
+                )
+
             logger.info(f"Backup verification completed: {verification_results}")
-            
+
         except Exception as e:
             logger.error(f"Backup verification task failed: {str(e)}")
             await self._send_alert('backup_verification_failed', str(e))
 
     async def _performance_analytics_task(self):
-        """Gather and analyze performance metrics"""
+        """Gather and analyze real database/storage metrics"""
         task_id = f"perf_analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"Starting performance analytics task: {task_id}")
-        
+
         try:
-            # Gather performance metrics
+            db_metrics = await supabase_integration.get_database_metrics()
+            user_activity = await supabase_integration.get_user_activity_metrics()
+            data_integrity = await supabase_integration.check_data_integrity()
+
             metrics = {
-                "api_response_times": await self._get_api_metrics(),
-                "database_performance": await self._get_db_metrics(),
-                "frontend_vitals": await self._get_frontend_metrics(),
-                "error_rates": await self._get_error_metrics()
+                "database": db_metrics,
+                "user_activity": user_activity,
+                "data_integrity": data_integrity,
             }
-            
-            # Analyze trends and generate alerts if needed
-            await self._analyze_performance_trends(metrics)
-            
-            logger.info("Performance analytics completed")
-            
+
+            # Alert if data integrity issues found
+            issues = data_integrity.get('issues_found', [])
+            if issues:
+                await self._send_alert(
+                    'data_integrity_issues',
+                    f"Found {len(issues)} data integrity issues",
+                    metrics
+                )
+
+            logger.info(f"Performance analytics completed: {json.dumps(db_metrics, default=str)}")
+
         except Exception as e:
             logger.error(f"Performance analytics task failed: {str(e)}")
             await self._send_alert('performance_analytics_failed', str(e))
 
     async def _cost_monitoring_task(self):
-        """Monitor costs and usage across services"""
+        """Monitor storage usage and record counts as cost proxies"""
         task_id = f"cost_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"Starting cost monitoring task: {task_id}")
-        
+
         try:
-            # Simulate cost monitoring
-            # In real implementation, this would:
-            # 1. Check Supabase usage and billing
-            # 2. Check Vercel usage and billing
-            # 3. Monitor storage usage trends
-            # 4. Alert on unusual spending patterns
-            
+            db_metrics = await supabase_integration.get_database_metrics()
+            storage_metrics = await supabase_integration.get_storage_metrics()
+
             cost_data = {
-                "supabase_usage": {
-                    "database_size": "250MB",
-                    "api_requests": 45000,
-                    "storage_used": "1.2GB",
-                    "estimated_cost": 15.50
-                },
-                "vercel_usage": {
-                    "bandwidth": "50GB",
-                    "function_invocations": 25000,
-                    "estimated_cost": 8.25
-                }
+                "database_record_counts": db_metrics,
+                "storage": storage_metrics,
+                "timestamp": datetime.now().isoformat()
             }
-            
-            total_cost = cost_data["supabase_usage"]["estimated_cost"] + cost_data["vercel_usage"]["estimated_cost"]
-            
-            # Alert if approaching budget threshold
-            if total_cost > 20:  # $20 threshold
-                await self._send_alert(
-                    'cost_threshold_warning',
-                    f"Monthly cost approaching threshold: ${total_cost:.2f}",
-                    cost_data
-                )
-            
-            logger.info(f"Cost monitoring completed: Total estimated: ${total_cost:.2f}")
-            
+
+            # Alert if any table exceeds a row-count threshold (proxy for growth)
+            for key, val in db_metrics.items():
+                if key.endswith('_count') and isinstance(val, (int, float)) and val > 10000:
+                    await self._send_alert(
+                        'high_record_count',
+                        f"{key} has {val} records - review retention policy",
+                        cost_data
+                    )
+
+            logger.info(f"Cost monitoring completed: {json.dumps(db_metrics, default=str)}")
+
         except Exception as e:
             logger.error(f"Cost monitoring task failed: {str(e)}")
             await self._send_alert('cost_monitoring_failed', str(e))
-
-    async def _get_api_metrics(self):
-        """Get API performance metrics"""
-        # In real implementation, this would query Supabase logs
-        return {
-            "avg_response_time": "245ms",
-            "95th_percentile": "450ms",
-            "error_rate": "0.2%"
-        }
-
-    async def _get_db_metrics(self):
-        """Get database performance metrics"""
-        # In real implementation, this would query database stats
-        return {
-            "connection_pool_usage": "12/20",
-            "slow_queries": 3,
-            "cache_hit_ratio": "94%"
-        }
-
-    async def _get_frontend_metrics(self):
-        """Get frontend performance metrics"""
-        # In real implementation, this would collect Web Vitals
-        return {
-            "first_contentful_paint": "1.2s",
-            "largest_contentful_paint": "2.1s",
-            "cumulative_layout_shift": "0.05"
-        }
-
-    async def _get_error_metrics(self):
-        """Get error rate metrics"""
-        # In real implementation, this would analyze error logs
-        return {
-            "total_errors": 12,
-            "error_rate": "0.2%",
-            "most_common": "Authentication timeout"
-        }
-
-    async def _analyze_performance_trends(self, metrics):
-        """Analyze performance trends and generate alerts"""
-        # Simple trend analysis - in production, this would be more sophisticated
-        issues = []
-        
-        if metrics["api_response_times"]["95th_percentile"] > "1000ms":
-            issues.append("API response times degraded")
-        
-        if float(metrics["api_response_times"]["error_rate"].rstrip('%')) > 1.0:
-            issues.append("Error rate elevated")
-        
-        if issues:
-            await self._send_alert('performance_degradation', "; ".join(issues), metrics)
 
     async def _send_alert(self, alert_type: str, message: str, data: Dict = None):
         """Send alert notifications"""
